@@ -1,0 +1,809 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8">
+  <title>Study Tracker Assam</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <script src="https://unpkg.com/lucide@latest"></script>
+
+ <script type="module">
+import { initializeApp } from "https://www.gstatic.com/firebasejs/9.23.0/firebase-app.js";
+import {
+  getFirestore, collection, addDoc, getDocs,
+  doc, getDoc, updateDoc, deleteDoc,
+  query, where, onSnapshot, orderBy, serverTimestamp
+} from "https://www.gstatic.com/firebasejs/9.23.0/firebase-firestore.js";
+
+/* ---------- FIREBASE ---------- */
+const firebaseConfig = {
+  apiKey: "AIzaSyC4p3HnfZ0_e-8ghcHYo1FG4u-ywfGv3L8",
+  authDomain: "study-b5df9.firebaseapp.com",
+  projectId: "study-b5df9",
+  storageBucket: "study-b5df9.firebasestorage.app",
+  messagingSenderId: "149030701226",
+  appId: "1:149030701226:web:f94b25e63e0c4af9c728d3"
+};
+const app = initializeApp(firebaseConfig);
+const db = getFirestore(app);
+
+let userRef, userDocRef;
+let editMode = false;
+
+/* ---------- DATA ---------- */
+const chapters = {
+  Physics: ["Kinematics", "NLM", "Rotation"],
+  Chemistry: ["Bonding", "Thermodynamics"],
+  Mathematics: ["Limits", "Integration"]
+};
+
+/* ---------- UTILS ---------- */
+const fill = (id, a) => {
+  const e = document.getElementById(id);
+  e.innerHTML = "";
+  a.forEach(v => e.add(new Option(v, v)));
+};
+const toMin = (h, m, ap) => {
+  h = parseInt(h); m = parseInt(m);
+  if (ap === "PM" && h !== 12) h += 12;
+  if (ap === "AM" && h === 12) h = 0;
+  return h * 60 + m;
+};
+const weekLabel = d =>
+  `${new Date(d).toLocaleString("en",{month:"long"})} ${Math.ceil(new Date(d).getDate()/7)} Week`;
+const daysBetween = (a,b)=>Math.ceil((b-a)/86400000);
+
+/* ---------- INIT ---------- */
+window.onload = async () => {
+  const s = JSON.parse(localStorage.getItem("user"));
+
+  /* ===== AUTH ===== */
+  if (!s) {
+    authBox.style.display = "flex";
+    document.body.classList.add("auth-active");
+
+    loginTab.onclick = () => {
+      loginTab.classList.add("active");
+      registerTab.classList.remove("active");
+      loginForm.style.display = "flex";
+      registerForm.style.display = "none";
+    };
+
+    registerTab.onclick = () => {
+      registerTab.classList.add("active");
+      loginTab.classList.remove("active");
+      registerForm.style.display = "flex";
+      loginForm.style.display = "none";
+    };
+
+    loginBtn.onclick = async () => {
+      const q = query(
+        collection(db,"users"),
+        where("loginKey","==",loginUser.value),
+        where("password","==",loginPassword.value)
+      );
+      const snap = await getDocs(q);
+      if (snap.empty) return alert("Invalid credentials");
+
+      localStorage.setItem("user", JSON.stringify({
+        uid: snap.docs[0].id,
+        name: snap.docs[0].data().name
+      }));
+      location.reload();
+    };
+
+    registerBtn.onclick = async () => {
+      const d = await addDoc(collection(db,"users"),{
+        name: regName.value,
+        username: regUser.value,
+        phone: regPhone.value,
+        loginKey: regUser.value,
+        password: regPassword.value,
+        createdAt: serverTimestamp()
+      });
+      localStorage.setItem("user", JSON.stringify({uid:d.id,name:regName.value}));
+      location.reload();
+    };
+
+    return;
+  }
+
+  /* ===== LOGGED IN ===== */
+  document.body.classList.remove("auth-active");
+  userName.textContent = s.name;
+
+  userRef = collection(db,"users",s.uid,"entries");
+  userDocRef = doc(db,"users",s.uid);
+
+  fill("sh",[...Array(12)].map((_,i)=>String(i+1).padStart(2,"0")));
+  fill("eh",[...Array(12)].map((_,i)=>String(i+1).padStart(2,"0")));
+  fill("sm",[...Array(60)].map((_,i)=>String(i).padStart(2,"0")));
+  fill("em",[...Array(60)].map((_,i)=>String(i).padStart(2,"0")));
+  fill("sap",["AM","PM"]);
+  fill("eap",["AM","PM"]);
+
+  subject.onchange = () => {
+    chapter.innerHTML = "<option value=''>Chapter</option>";
+    (chapters[subject.value]||[]).forEach(c=>chapter.add(new Option(c,c)));
+  };
+
+  save.onclick = async () => {
+    const s1 = toMin(sh.value,sm.value,sap.value);
+    const e1 = toMin(eh.value,em.value,eap.value);
+    if (e1<=s1) return alert("Invalid time");
+
+    await addDoc(userRef,{
+      subject: subject.value,
+      chapter: chapter.value,
+      date: date.value,
+      hours: (e1-s1)/60,
+      createdAt: serverTimestamp()
+    });
+  };
+
+  logout.onclick = () => {
+    localStorage.removeItem("user");
+    location.reload();
+  };
+
+  profileBtn.onclick = () => profilePage.style.display="flex";
+  closeProfile.onclick = () => profilePage.style.display="none";
+
+  editProfile.onclick = () => {
+    editMode = !editMode;
+    setEditable(editMode);
+  };
+
+  saveProfile.onclick = async () => {
+    await updateDoc(userDocRef,{
+      name: pName.value,
+      username: pUsername.value,
+      phone: pPhone.value,
+      targetTitle: pTarget.value,
+      targetStart: targetStart.value,
+      targetEnd: targetEnd.value
+    });
+    userName.textContent = pName.value;
+    updateProgress(targetStart.value,targetEnd.value);
+    editMode=false;
+    setEditable(false);
+  };
+
+  resetData.onclick = resetUserData;
+
+  loadProfile();
+  startRealtime();
+  lucide.createIcons();
+};
+
+/* ---------- PROFILE ---------- */
+async function loadProfile(){
+  const u=(await getDoc(userDocRef)).data();
+  pName.value=u.name||"";
+  pUsername.value=u.username||"";
+  pPhone.value=u.phone||"";
+  pTarget.value=u.targetTitle||"";
+  targetStart.value=u.targetStart||"";
+  targetEnd.value=u.targetEnd||"";
+  setEditable(false);
+  if(u.targetStart&&u.targetEnd) updateProgress(u.targetStart,u.targetEnd);
+}
+
+function setEditable(v){
+  [pName,pUsername,pPhone,pTarget,targetStart,targetEnd].forEach(i=>i.disabled=!v);
+  saveProfile.style.display=v?"inline-flex":"none";
+}
+
+function updateProgress(s,e){
+  const st=new Date(s), en=new Date(e), now=new Date();
+  const total=daysBetween(st,en);
+  const done=Math.max(0,daysBetween(st,now));
+  const left=Math.max(0,total-done);
+  progBar.style.width=Math.min(100,(done/total)*100)+"%";
+  progText.textContent=`${pTarget.value||"Target"} • Day ${done} • ${left} days left`;
+}
+
+/* ---------- RESET DATA ---------- */
+async function resetUserData(){
+  if(!confirm("This will permanently delete ALL your study data. Continue?")) return;
+  const snap = await getDocs(userRef);
+  await Promise.all(
+    snap.docs.map(d =>
+      deleteDoc(doc(db,"users",
+        JSON.parse(localStorage.getItem("user")).uid,
+        "entries",
+        d.id))
+    )
+  );
+  alert("All study data deleted.");
+}
+
+/* ---------- REALTIME ---------- */
+function startRealtime(){
+  const q=query(userRef,orderBy("createdAt","desc"));
+  onSnapshot(q,snap=>{
+    right.innerHTML="";
+    let total=0,week=0,today=0;
+    const now=new Date().toISOString().slice(0,10);
+    const sub={Physics:0,Chemistry:0,Mathematics:0};
+    const grp={};
+
+    snap.forEach(d=>{
+      const x=d.data();
+      total+=x.hours;
+      sub[x.subject]+=x.hours;
+      if(x.date===now) today+=x.hours;
+      if(Math.abs(new Date(x.date)-new Date())<7*864e5) week+=x.hours;
+      (grp[weekLabel(x.date)]??=[]).push(x);
+    });
+
+    Object.entries(grp).forEach(([l,it])=>{
+      right.innerHTML+=`<div class="group">${l}</div>`;
+      it.forEach(x=>{
+        right.innerHTML+=`
+          <div class="entry">
+            <span>${x.subject} • ${x.chapter}</span>
+            <b>${x.hours.toFixed(2)}h</b>
+          </div>`;
+      });
+    });
+
+    totalEl.textContent=total.toFixed(2)+"h";
+    weekEl.textContent=week.toFixed(2)+"h";
+    todayEl.textContent=today.toFixed(2)+"h";
+    phyEl.textContent=sub.Physics.toFixed(2)+"h";
+    chemEl.textContent=sub.Chemistry.toFixed(2)+"h";
+    mathEl.textContent=sub.Mathematics.toFixed(2)+"h";
+  });
+}
+</script>
+
+
+  <style>
+    :root {
+      --pri: #2563eb;
+      --pri-soft: #e0e7ff;
+      --bg: #f1f5f9;
+      --card: #ffffff;
+      --border: #e5e7eb;
+    }
+
+    * {
+      box-sizing: border-box;
+      font-family: Inter, system-ui
+    }
+
+    html,
+    body {
+      height: 100%;
+      margin: 0;
+      overflow: hidden
+    }
+
+    body {
+      background: var(--bg);
+      font-size: 12px
+    }
+
+    /* ICON FIX */
+    .iconbtn {
+      width: 32px;
+      height: 32px;
+      border-radius: 50%;
+      background: var(--pri-soft);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      border: none;
+      cursor: pointer;
+      transition: .2s ease;
+    }
+
+    .iconbtn svg {
+      width: 18px;
+      height: 18px
+    }
+
+    .iconbtn:hover {
+      transform: scale(1.08);
+      background: #c7d2fe
+    }
+
+    /* NAV */
+    .nav {
+      height: 48px;
+      background: #fff;
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0 14px;
+    }
+
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-weight: 700
+    }
+
+    .brand img {
+      height: 24px
+    }
+
+    .user {
+      display: flex;
+      align-items: center;
+      gap: 10px
+    }
+
+    /* APP LAYOUT FIX */
+    .app {
+      height: calc(100vh - 48px);
+      display: flex;
+      gap: 14px;
+      padding: 14px;
+    }
+
+    /* LEFT PANEL FIX */
+    .left {
+      width: 40vw;
+      height: 70vh;
+      background: #fff;
+      border-radius: 18px;
+      border: 1px solid var(--border);
+      padding: 12px;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+
+    /* RIGHT PANEL */
+    .right {
+      flex: 1;
+      height: 100%;
+      overflow: auto;
+    }
+
+    /* STATS */
+    .stats {
+      display: grid;
+      grid-template-columns: repeat(6, 1fr);
+      gap: 6px
+    }
+
+    .card {
+      background: var(--card);
+      border-radius: 12px;
+      padding: 8px;
+      transition: .2s ease;
+    }
+
+    .card:hover {
+      transform: translateY(-2px);
+      box-shadow: 0 6px 18px #0001
+    }
+
+    .card small {
+      font-size: 10px;
+      color: #64748b
+    }
+
+    .card h2 {
+      margin: 2px 0 0;
+      font-size: 14px
+    }
+
+    /* PROGRESS */
+    .progress {
+      height: 6px;
+      background: #dbeafe;
+      border-radius: 4px
+    }
+
+    .progress span {
+      height: 100%;
+      display: block;
+      background: var(--pri)
+    }
+
+    /* FORM */
+    .form {
+      background: var(--card);
+      border-radius: 14px;
+      padding: 10px;
+      display: grid;
+      gap: 6px;
+      flex: 1;
+    }
+
+    label {
+      font-size: 10px;
+      color: #64748b
+    }
+
+    .row3 {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 5px
+    }
+
+    select,
+    input {
+      padding: 6px;
+      border-radius: 8px;
+      border: 1px solid var(--border);
+      font-size: 11px;
+    }
+
+    button {
+      padding: 8px;
+      border: none;
+      border-radius: 10px;
+      background: linear-gradient(135deg, var(--pri), #38bdf8);
+      color: #fff;
+      font-weight: 600;
+      transition: .2s;
+    }
+
+    button:hover {
+      transform: translateY(-1px);
+      box-shadow: 0 8px 20px #2563eb55
+    }
+
+    /* ENTRIES */
+    .group {
+      font-weight: 700;
+      margin: 4px 0
+    }
+
+    .entry {
+      background: var(--card);
+      border-radius: 10px;
+      padding: 8px 12px;
+      margin-bottom: 5px;
+      display: flex;
+      justify-content: space-between;
+      transition: .2s;
+    }
+
+    .entry:hover {
+      background: #eef2ff
+    }
+    /* ================= PROFILE MODAL ================= */
+
+.profile {
+  position: fixed;
+  inset: 0;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  backdrop-filter: blur(14px);
+  background: rgba(15, 23, 42, 0.35);
+  z-index: 999;
+}
+
+/* Modal card */
+.profile .wrap {
+  width: 520px;
+  max-width: 92vw;
+  background: rgba(255, 255, 255, 0.78);
+  backdrop-filter: blur(18px);
+  border-radius: 22px;
+  padding: 22px;
+  box-shadow: 0 30px 80px rgba(0,0,0,0.35);
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+
+/* Header */
+.profile-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.profile-top h2 {
+  font-size: 18px;
+  font-weight: 700;
+  color: #0f172a;
+}
+
+/* Header action buttons */
+.profile-actions {
+  display: flex;
+  gap: 10px;
+}
+
+/* Icon buttons (pencil & close) */
+.profile-icon {
+  width: 38px;
+  height: 38px;
+  border-radius: 50%;
+  border: none;
+  cursor: pointer;
+
+  display: flex;
+  align-items: center;
+  justify-content: center;
+
+  background: rgba(255, 255, 255, 0.9);
+  color: #0f172a;
+
+  box-shadow: 0 8px 20px rgba(0,0,0,0.18);
+  transition: all 0.2s ease;
+}
+
+.profile-icon svg {
+  width: 18px;
+  height: 18px;
+}
+
+.profile-icon:hover {
+  transform: scale(1.08);
+  background: #ffffff;
+}
+
+/* Close button danger hint */
+#closeProfile:hover {
+  background: #fee2e2;
+  color: #b91c1c;
+}
+    .section {
+      background: var(--card);
+      border-radius: 14px;
+      padding: 12px;
+      display: grid;
+      gap: 6px;
+    }
+
+    .grid3 {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 8px
+    }
+
+    input:disabled {
+      background: #f8fafc
+    }
+
+    .auth {
+      position: fixed;
+      inset: 0;
+      width: 100vw;
+      height: 100vh;
+      background:
+        radial-gradient(circle at center, rgba(255, 255, 255, 0.08), transparent 60%),
+        linear-gradient(135deg, #2563eb, #38bdf8);
+      display: none;
+      align-items: center;
+      justify-content: center;
+    }
+
+    .authbox button {
+      padding: 14px;
+      font-size: 15px;
+      border-radius: 14px;
+      background: linear-gradient(135deg, #2563eb, #38bdf8);
+      color: #fff;
+      font-weight: 600;
+      border: none;
+      cursor: pointer;
+    }
+
+
+    .authbox {
+      background: #fff;
+      padding: 32px;
+      border-radius: 22px;
+      width: 420px;
+      /* 🔥 bigger */
+      max-width: 90vw;
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+      /* more breathing space */
+      box-shadow: 0 30px 80px rgba(0, 0, 0, 0.25);
+    }
+
+    .auth-tabs {
+      display: flex;
+      gap: 8px;
+      background: #f1f5f9;
+      padding: 6px;
+      border-radius: 14px;
+    }
+
+    .auth-tabs button {
+      flex: 1;
+      padding: 12px 0;
+      /* 🔥 taller tabs */
+      border: none;
+      border-radius: 12px;
+      background: transparent;
+      font-weight: 600;
+      font-size: 14px;
+      cursor: pointer;
+      color: #64748b;
+    }
+
+    .auth-tabs button.active {
+      background: #2563eb;
+      color: #fff;
+      box-shadow: 0 6px 16px rgba(37, 99, 235, 0.4);
+    }
+
+    #loginForm,
+    #registerForm {
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+  </style>
+</head>
+
+<body>
+
+  <div class="nav">
+    <div class="brand">
+      <img src="logo.png">
+      <span>STUDY TRACKER ASSAM</span>
+    </div>
+    <div class="user">
+      <span id="userName"></span>
+      <button class="iconbtn" id="profileBtn"><i data-lucide="user"></i></button>
+      <button class="iconbtn" id="logout"><i data-lucide="log-out"></i></button>
+    </div>
+  </div>
+
+  <div class="app">
+    <div class="left">
+      <div class="stats">
+        <div class="card"><small>Total</small>
+          <h2 id="totalEl">0.00h</h2>
+        </div>
+        <div class="card"><small>This Week</small>
+          <h2 id="weekEl">0.00h</h2>
+        </div>
+        <div class="card"><small>Today</small>
+          <h2 id="todayEl">0.00h</h2>
+        </div>
+        <div class="card"><small>Physics</small>
+          <h2 id="phyEl">0.00h</h2>
+        </div>
+        <div class="card"><small>Chemistry</small>
+          <h2 id="chemEl">0.00h</h2>
+        </div>
+        <div class="card"><small>Maths</small>
+          <h2 id="mathEl">0.00h</h2>
+        </div>
+      </div>
+
+      <div class="card">
+        <small id="progText">No target set</small>
+        <div class="progress"><span id="progBar"></span></div>
+      </div>
+
+      <div class="form">
+        <label>Date</label>
+        <input type="date" id="date">
+
+        <label>From</label>
+        <div class="row3">
+          <select id="sh"></select>
+          <select id="sm"></select>
+          <select id="sap"></select>
+        </div>
+
+        <label>To</label>
+        <div class="row3">
+          <select id="eh"></select>
+          <select id="em"></select>
+          <select id="eap"></select>
+        </div>
+
+        <select id="subject">
+          <option value="">Subject</option>
+          <option>Physics</option>
+          <option>Chemistry</option>
+          <option>Mathematics</option>
+        </select>
+
+        <select id="chapter">
+          <option value="">Chapter</option>
+        </select>
+
+        <button id="save"><i data-lucide="plus"></i> Add Session</button>
+      </div>
+    </div>
+
+    <div class="right" id="right"></div>
+  </div>
+
+  <div class="profile" id="profilePage">
+    <div class="wrap">
+      <div class="profile-top">
+  <h2>Profile</h2>
+
+  <div class="profile-actions">
+    <button class="profile-icon" id="editProfile" title="Edit">
+      <i data-lucide="pencil"></i>
+    </button>
+    <button class="profile-icon" id="closeProfile" title="Close">
+      <i data-lucide="x"></i>
+    </button>
+  </div>
+</div>
+
+      <div class="section grid3">
+  <div>
+    <label>Full Name</label>
+    <input id="pName" disabled>
+  </div>
+  <div>
+    <label>Username</label>
+    <input id="pUsername" disabled>
+  </div>
+  <div>
+    <label>Phone</label>
+    <input id="pPhone" disabled>
+  </div>
+</div>
+
+
+      <div class="section grid3">
+  <div>
+    <label>Target Title</label>
+    <input id="pTarget" placeholder="JEE 2026" disabled>
+  </div>
+  <div>
+    <label>Start Date</label>
+    <input type="date" id="targetStart" disabled>
+  </div>
+  <div>
+    <label>End Date</label>
+    <input type="date" id="targetEnd" disabled>
+  </div>
+</div>
+
+
+      <button id="saveProfile" style="display:none">
+        <i data-lucide="save"></i> Save Changes
+      </button>
+      <button id="resetData" style="background:#ef4444">
+  <i data-lucide="trash-2"></i> Reset All Data
+</button>
+    </div>
+  </div>
+
+  <div class="auth" id="authBox">
+    <div class="authbox">
+
+      <div class="auth-tabs">
+        <button id="loginTab" class="active">Login</button>
+        <button id="registerTab">Register</button>
+      </div>
+
+      <!-- LOGIN -->
+      <div id="loginForm">
+        <input id="loginUser" placeholder="Username or Phone">
+        <input id="loginPassword" type="password" placeholder="Password">
+        <button id="loginBtn">Login</button>
+      </div>
+
+      <!-- REGISTER -->
+      <div id="registerForm" style="display:none">
+        <input id="regName" placeholder="Full Name">
+        <input id="regUser" placeholder="Username">
+        <input id="regPhone" placeholder="Phone">
+        <input id="regPassword" type="password" placeholder="Password">
+        <button id="registerBtn">Register</button>
+      </div>
+
+    </div>
+  </div>
+
+</body>
+
+</html>
